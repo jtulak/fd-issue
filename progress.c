@@ -1,27 +1,29 @@
 #include <glib.h>
 #include <blockdev/blockdev.h>
 #include <blockdev/fs.h>
-
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 
-#define USE_BLK
-
-
-#define FD_FILE "progress.fd"
-
+/**
+ * Truncate the progress file before we start writing to it.
+ * We don't want the file to contain old data.
+ */
 void 
-truncate_fd_file()
+truncate_fd_file(char *fname)
 {
     FILE *f;
-    f = fopen(FD_FILE, "w");
+    f = fopen(fname, "w");
     fclose(f);
 }
 
+/**
+ * A log handler for libblockdev
+ */
 void
 logprint (gint level, const gchar *msg)
 {
@@ -29,56 +31,48 @@ logprint (gint level, const gchar *msg)
     printf("LOG %d: %s\n", level, msg);
 }
 
-
+/**
+ * Run fsck using glib's spawn function.
+ */
 int
-main(int argc, char **argv)
+fsck_glib(char *fs, char *fd_str)
 {
-
-    char *filename;
-    int fd;
-    int fd2;
-    char fd_str[20];
-    FILE *f;
+    gint ret;
     g_autoptr(GError) error = NULL;
+    char *cmd[] = {"e2fsck", "-f", "-n", fs, "-C", fd_str, NULL};
+    gchar *stdout = NULL;
+    gchar *stderr = NULL;
 
-    char * line = NULL;
-    size_t len = 0;
-    ssize_t read;
-
-    /* argparse */
-    if (argc == 1 || strcmp("-h", argv[1]) == 0) {
-        printf("Usage: %s FS\n", argv[0]);
-        printf("FS is the ext4 filesystem to check.\n");
-        printf("A new file 'progress.fd' will be created in $CURRENT_DIR.\n");
-        return 0;
-    }
-
-    if (getuid () != 0) {
-        g_print ("Requires to be run as root!\n");
+    /* run the command */
+    printf("running command: %s %s %s %s %s %s\n", cmd[0], cmd[1], cmd[2], cmd[3], cmd[4], cmd[5]);
+    g_spawn_sync(NULL, cmd, NULL, G_SPAWN_SEARCH_PATH|G_SPAWN_LEAVE_DESCRIPTORS_OPEN, NULL,
+                          NULL, &stdout, &stderr, &ret, &error);
+    if (error != NULL)
+    {
+        g_error ("Spawning child failed: %s", error->message);
         return 1;
     }
 
-    /* initialize the output file and desriptor */
+    if (stdout != NULL)
+        printf("STDOUT:\n%s\n", stdout);
+    if (stderr != NULL)
+        printf("STDERR:\n%s\n", stderr);
+    
+    return ret;
+}
 
-    filename = argv[1];
-    truncate_fd_file();
-
-    fd = open("progress.fd", O_RDWR);
-    printf("FD is %d\n", fd);
-    /* try to verify if it works, the same way libblockdev does it */
-    fd2 = dup(fd);
-    printf("FD2 is %d\n", fd2);
-    /* get a FILE for other operations */
-    f = fdopen(fd, "r+");
-    sprintf(fd_str, "%d", fd);
-
-#ifdef USE_BLK
-    int ret;
+/**
+ * Run fsck using a libblockdev's function.
+ */
+int
+fsck_blockdev(char *fs, char *fd_str)
+{
+    gint ret;
+    g_autoptr(GError) error = NULL;
     BDPluginSpec fs_plugin = {BD_PLUGIN_FS, NULL};
     BDPluginSpec *plugins[] = {&fs_plugin, NULL};
-    /* initialize the library (if it isn't already initialized) and load
-     * all required modules
-     */
+
+    /* init */
     ret = bd_ensure_init (plugins, &logprint, &error);
     if (!ret) {
         g_print ("Error initializing libblockdev library: %s (%s, %d)\n",
@@ -86,45 +80,116 @@ main(int argc, char **argv)
         return 1;
     }
 
+    /* create extra args to pass the file descriptor */
     BDExtraArg label_arg = {"-C", fd_str};
-    BDExtraArg label_arg2 = {"", NULL};
-    const BDExtraArg *extra_args[3] = {&label_arg, &label_arg2, NULL};
+    const BDExtraArg *extra_args[2] = {&label_arg, NULL};
 
-    bd_fs_ext4_check (filename, extra_args, &error);
-
-#else
-
-    char *cmd;
-    const char *cmd_template = "e2fsck -f -n %s -C %d &> /dev/null & \0";
-    /* 
-     * Prepare the space for the command - take the two known strings we are
-     * joining and add some more space for the fd number.
-     */
-    cmd = malloc(sizeof(filename) + sizeof(cmd_template) + 20*sizeof(char));
-    sprintf(cmd, cmd_template, filename, fd);
-    printf("running command: %s\n", cmd);
-    system(cmd);
-    printf("In progress...\n");
-#endif
-
-    fpos_t last;
-    fpos_t prelast;
-    for (int i=0; i<33; i++) {
-        int wrote = 0;
-        usleep(300*1000);
-        fgetpos(f, &last);
-        fgetpos(f, &prelast);
-        while ((read = getline(&line, &len, f)) != -1) {
-            last = prelast;
-            fgetpos(f, &prelast);
-            wrote = 1;
-            printf("# %s", line);
-        }
-        fsetpos(f, &last);
-        if (!wrote)
-            printf(".\n");
-    }
-    printf("\n");
-
+    /* run fsck */
+    bd_fs_ext4_check (fs, extra_args, &error);
     return 0;
+}
+
+void
+print_usage(char *name) {
+    fprintf(stderr, "Usage: %s -b|-g device\n"
+                    "  device   Path to ext4 device/image to fsck.\n"
+                    "      -b   Use libblockdev method.\n"
+                    "      -g   Use glib method.\n"
+                    "The -b and -g flags can be used at the same time - then it will run both methods.\n"
+                    "New files 'progress.b.out' and 'progress.g.out' will be created in $CURRENT_DIR.\n",
+            name);
+}
+
+/**
+ * create a file, open a descriptor to it and return the descriptor.
+ */
+int
+create_fd(char *fname) {
+    int fd;
+    truncate_fd_file(fname);
+    fd = open(fname, O_RDWR);
+    printf("FD is %d\n", fd);
+    return fd;
+}
+
+int
+main(int argc, char **argv)
+{
+    int fd, opt, use_blk, use_glib;
+    char fd_str[20];
+    char *devicename;
+    struct stat buf;
+
+    devicename = NULL;
+    use_blk = 0;
+    use_glib = 0;
+
+    /* argparse */
+    while ((opt = getopt(argc, argv, "bg")) != -1) {
+        switch (opt) {
+        case 'b':
+            use_blk = 1;
+            break;
+        case 'g':
+            use_glib = 1;
+            break;
+        default: /* '?' */
+            print_usage(argv[0]);
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    /* test for mandatory device arg */
+    if (optind >= argc) {
+        fprintf(stderr, "Expected adevice/image path.\n");
+        print_usage(argv[0]);
+        exit(EXIT_FAILURE);
+    }
+
+    devicename = argv[optind];
+
+    /* test for extra args */
+    if (optind < argc-1) {
+        fprintf(stderr, "Too many arguments.\n");
+        print_usage(argv[0]);
+        exit(EXIT_FAILURE);
+    }
+
+    /* at least one has to be selected */
+    if (!use_blk && !use_glib) {
+        print_usage(argv[0]);
+        exit(EXIT_FAILURE);
+    }
+
+    /* won't work without root */
+    if (getuid () != 0) {
+        g_print ("Requires to be run as root!\n");
+        exit(EXIT_FAILURE);
+    }
+
+    /* run the fsck checks */
+    if (use_blk) {
+        printf("Running libblockdev fsck.\n");
+
+        fd = create_fd("progress.b.fd");
+        sprintf(fd_str, "%d", fd);
+        fsck_blockdev(devicename, fd_str);
+
+        fstat(fd, &buf);
+        printf("Size of the file with progress info: %ld B\n", buf.st_size);
+        printf("\n");
+    }
+    if (use_glib) {
+        printf("Running glib fsck.\n");
+
+        create_fd("progress.g.fd");
+        sprintf(fd_str, "%d", fd);
+        fsck_glib(devicename, fd_str);
+
+        fstat(fd, &buf);
+        printf("Size of the file with progress info: %ld B\n", buf.st_size);
+        printf("\n");
+    }
+
+    return EXIT_SUCCESS;
 }

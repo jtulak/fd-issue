@@ -1,5 +1,5 @@
 GCC=@gcc
-CFLAGS=-Wall -pedantic `pkg-config --cflags blockdev glib-2.0`
+CFLAGS=-Wall -g -pedantic `pkg-config --cflags blockdev glib-2.0`
 CLIBS=`pkg-config --libs blockdev glib-2.0` -lm
 RM=@rm -rf
 

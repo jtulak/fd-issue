@@ -1,6 +1,6 @@
-GCC=@gcc
-CFLAGS=-Wall -g -pedantic `pkg-config --cflags blockdev glib-2.0`
-CLIBS=`pkg-config --libs blockdev glib-2.0` -lm
+GCC=gcc
+CFLAGS=-Wall -g -pedantic `pkg-config --cflags glib-2.0 blockdev `
+CLIBS=`pkg-config --libs glib-2.0 blockdev` -lbd_utils -lm
 RM=@rm -rf
 
 .PHONY: progress

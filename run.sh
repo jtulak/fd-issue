@@ -15,5 +15,4 @@ DEV=$1
 make &&
     sudo \
         time -p \
-        systemd-run -p "IOReadBandwidthMax=$DEV 1M" --scope \
         ./progress $DEV

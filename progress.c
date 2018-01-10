@@ -1,35 +1,34 @@
-#include <glib.h>
+/**
+ * An example of a progress for e2fsck in libblockdev.
+ */
 #include <blockdev/blockdev.h>
 #include <blockdev/fs.h>
-#include <blockdev/exec.h>
-#include <blockdev/utils.h>
 #include <stdio.h>
-#include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <regex.h>
 
 // shrink - max 11810111488 min 11010111488
 
 /**
- * A log handler for libblockdev
+ * A callback for a status report, passed to libblockdev.
  */
-void
-logprint (gint level, const gchar *msg)
-{
-    printf("LOG %d: %s\n", level, msg);
-}
-
 void prog_report(guint64 task_id, BDUtilsProgStatus status, guint8 completion, gchar *msg)
 {
     static gint8 last_perc = -1;
 
+    /*
+       This function is called every time the running tool reports a
+       progress. However, anything reported is rounded to whole percent by
+       libblockdev. That means that in this function we can repeatedly see
+       the same value: 42, 42, 42, 43, ... We don't want to spam the user's
+       terminal with it, though, so we print every number just once.
+    */
     if (msg == NULL && completion != last_perc) {
         printf("Progress: %d%%\n", completion);
-        //printf("\rProgress: %d%%", completion);
         fflush(stdout);
         last_perc = completion;
     }
+
     if (msg != NULL) {
         printf("\n%s\n", msg);
     }
@@ -46,22 +45,24 @@ int fsck_blockdev(char *fs, char *fd_str)
     BDPluginSpec *plugins[] = {&fs_plugin, NULL};
 
     /* init */
-    //ret = bd_ensure_init (plugins, &logprint, &error);
     ret = bd_ensure_init (plugins, NULL, &error);
     if (!ret) {
-        g_print ("Error initializing libblockdev library: %s (%s, %d)\n",
+        g_print("Error initializing libblockdev library: %s (%s, %d)\n",
              error->message, g_quark_to_string (error->domain), error->code);
         return 1;
     }
     bd_utils_init_prog_reporting(prog_report, &error);
 
-    /* create extra args to pass the file descriptor */
-    BDExtraArg label_arg = {"-C", fd_str};
-    const BDExtraArg *extra_args[2] = {&label_arg, NULL};
+    /* We can check if the progress reporting has been initialized or not
+       at any time
+    */
+    if(!bd_utils_prog_reporting_initialized()) {
+        g_print("Error, progress reporting is not initialized!\n");
+        return 1;
+    }
 
     /* run fsck */
-    bd_fs_ext4_check (fs, extra_args, &error);
-    //bd_fs_ext4_check_progress (fs, extra_args, &error, prog_extract);
+    bd_fs_ext4_check (fs, NULL, &error);
     return 0;
 }
 
